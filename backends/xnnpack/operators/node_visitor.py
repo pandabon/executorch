@@ -271,6 +271,12 @@ class NodeVisitor:
                     if force_fp32
                     else XNNDatatype.xnn_datatype_fp16
                 )
+            elif node_dtype is not None and node_dtype == torch.bfloat16:
+                dtype = (
+                    XNNDatatype.xnn_datatype_fp32
+                    if force_fp32
+                    else XNNDatatype.xnn_datatype_bf16
+                )
 
         return dtype
 
@@ -580,7 +586,7 @@ class NodeVisitor:
         # Quantize buffer if static data is indeed quantized
         if quant_params is not None and not quant_params.is_dynamic:
             const_val = quant_params.quantize_tensor(const_val).contiguous()
-        elif const_val.dtype != torch.float16 or force_fp32:
+        elif const_val.dtype not in (torch.float16, torch.bfloat16) or force_fp32:
             # ensure that the const is fp32
             const_val = const_val.to(dtype=torch.float32).contiguous()
 

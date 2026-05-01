@@ -62,15 +62,18 @@ class LinearVisitor(NodeVisitor):
         )
         filter_id = vals_to_ids[weight_node]
 
+        # XNNPACK bf16 fully connected requires fp32 bias.
+        input_val = input_node.meta.get("val", None)
+        is_bf16 = isinstance(input_val, torch.Tensor) and input_val.dtype == torch.bfloat16
+
         # bias
         if len(node.args) > 2:
             bias_node = get_input_node(node, 2)
             bias_quant_params = QuantParams.from_bias(
                 bias_node, weight_quant_params, input_quant_params
             )
-            # For dynamic quantization, there are no kernels with fp16 bias
-            # So we need to force the fp16 bias to fp32
-            force_fp32 = False
+            # Force fp32 bias for bf16 (kernel loads fp32 bias) and dynamic quant
+            force_fp32 = is_bf16
             if input_quant_params is not None and input_quant_params.is_dynamic:
                 force_fp32 = True
 

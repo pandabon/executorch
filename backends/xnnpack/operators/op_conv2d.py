@@ -70,14 +70,27 @@ class Conv2d(NodeVisitor):
             group_input_channels = kernel_shape[1]
             group_output_channels = int(kernel_shape[0] / groups)
 
+        # XNNPACK's bf16 conv2d uses bf16 input + bf16 weight (kernel
+        # narrows fp32 accum -> bf16 / -> fp32 on store). FP16 conv2d, by
+        # contrast, uses fp32 weight + fp16 input (mixed precision).
+        # Mirror op_linear: keep weight at input dtype for bf16, force
+        # fp32 otherwise.
+        input_val = input_node.meta.get("val", None)
+        is_bf16 = isinstance(input_val, torch.Tensor) and input_val.dtype == torch.bfloat16
+
         # XNNPACK expects the kernel's N and C dimensions to be swapped for
         # Depthwise Convolution, which occurs under the following conditions:
         # 1) groups = input_channels (i.e. group_input_channels = 1)
         # 2) output_channels is a positive integer multiple of input channels
+        # BF16 has no dwconv kernel and no bf16 case in the depthwise
+        # subgraph validator, so route bf16 convs through the regular
+        # XNNConv2d path (gic==1 with groups==1 isn't actually depthwise
+        # anyway — the heuristic is a fast-path opt-in, not a contract).
         is_depthwise_conv = (
             (group_input_channels == 1)
             and (group_output_channels % group_input_channels == 0)
             and not is_transpose
+            and not is_bf16
         )
         weight_quant_params = QuantParams.from_weights(
             kernel_node, self._exported_program
@@ -102,7 +115,7 @@ class Conv2d(NodeVisitor):
             swap_in_out_for_weights=is_depthwise_conv or is_transpose,
             quant_params=weight_quant_params,
             groups=groups if is_transpose else 1,
-            force_fp32=True,
+            force_fp32=not is_bf16,
         )
         kwargs["filter_id"] = vals_to_ids[get_input_node(node, 1)]
 
