@@ -345,7 +345,11 @@ class MaxPool2dConfig(GenericNodePartitionerConfig):
         return True
 
     def supported_precision_types(self) -> List[ConfigPrecisionType]:
-        return [ConfigPrecisionType.FP32, ConfigPrecisionType.STATIC_QUANT]
+        return [
+            ConfigPrecisionType.FP32,
+            ConfigPrecisionType.STATIC_QUANT,
+            ConfigPrecisionType.BF16,
+        ]
 
     def get_original_aten(self) -> Optional[torch._ops.OpOverload]:
         return torch.ops.aten.max_pool2d.default

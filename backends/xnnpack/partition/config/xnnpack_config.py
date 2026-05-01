@@ -31,6 +31,7 @@ class ConfigPrecisionType(Enum):
     FP32 = 1
     STATIC_QUANT = 2
     DYNAMIC_QUANT = 3
+    BF16 = 4
 
 
 class XNNPartitionerConfig(PartitionerConfig):
@@ -228,6 +229,7 @@ class XNNPartitionerConfig(PartitionerConfig):
         valid_dtypes = {
             torch.float32,
             torch.float16,
+            torch.bfloat16,
         }
         # Only allow int8 and quant dtypes for quant operations
         if is_quant(node) or is_dequant(node) or is_qparam(node):

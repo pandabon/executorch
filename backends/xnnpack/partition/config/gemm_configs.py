@@ -88,6 +88,9 @@ class GEMMConfig(XNNPartitionerConfig):
         weight = get_input_node(node, self.weight_idx)
 
         if not is_dequant(weight):
+            weight_val = weight.meta.get("val")
+            if weight_val is not None and weight_val.dtype == torch.bfloat16:
+                return ConfigPrecisionType.BF16
             return ConfigPrecisionType.FP32
 
         activation = get_input_node(node, self.act_idx)
@@ -148,7 +151,7 @@ class GEMMConfig(XNNPartitionerConfig):
         self, node: torch.fx.Node, ep: ExportedProgram, precision: ConfigPrecisionType
     ) -> Tuple[bool, List[torch.fx.Node]]:
         gemm_deps = []
-        if precision == ConfigPrecisionType.FP32:
+        if precision in (ConfigPrecisionType.FP32, ConfigPrecisionType.BF16):
             # First find the weight
             weight_node = get_input_node(node, self.weight_idx)
             if not is_param_node(ep, weight_node):
@@ -217,8 +220,8 @@ class GEMMConfig(XNNPartitionerConfig):
                 why(node, "Expected output node to have a dequantized node")
                 return (False, [])
             gemm_deps.append(n_output)
-        elif precision == ConfigPrecisionType.FP32:
-            # Look for fused activations only, and partition with fp32 op
+        elif precision in (ConfigPrecisionType.FP32, ConfigPrecisionType.BF16):
+            # Look for fused activations only, and partition with fp32/bf16 op
             node_users = list(node.users.keys())
             if len(node_users) == 1:
                 n_output = node_users[0]
@@ -228,7 +231,7 @@ class GEMMConfig(XNNPartitionerConfig):
                 ):
                     gemm_deps.append(n_output)
 
-        # FP32 and Dynamic Quant have no output dependencies
+        # FP32, BF16, and Dynamic Quant have no output dependencies
         return (True, gemm_deps)
 
     def _get_bias_deps(
@@ -257,7 +260,7 @@ class GEMMConfig(XNNPartitionerConfig):
         self, node: torch.fx.Node, ep: ExportedProgram, precision: ConfigPrecisionType
     ) -> Tuple[bool, List[torch.fx.Node]]:
         gemm_deps = []
-        if precision == ConfigPrecisionType.FP32:
+        if precision in (ConfigPrecisionType.FP32, ConfigPrecisionType.BF16):
             return (True, [])
         else:
             dq_input = get_input_node(node, self.act_idx)
@@ -338,6 +341,7 @@ class LinearConfig(GEMMConfig):
             ConfigPrecisionType.DYNAMIC_QUANT,
             ConfigPrecisionType.FP32,
             ConfigPrecisionType.STATIC_QUANT,
+            ConfigPrecisionType.BF16,
         ]
 
 
@@ -413,6 +417,7 @@ class ConvolutionConfig(GEMMConfig):
             ConfigPrecisionType.FP32,
             ConfigPrecisionType.STATIC_QUANT,
             ConfigPrecisionType.DYNAMIC_QUANT,
+            ConfigPrecisionType.BF16,
         ]
 
 
