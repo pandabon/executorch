@@ -19,11 +19,26 @@ class RemoveRedundantCopyPass(XNNPACKPass):
         if len(node.users) == 0:
             graph.erase_node(node)
 
+    @staticmethod
+    def _changes_dtype(src: torch.fx.Node, dst: torch.fx.Node) -> bool:
+        """True if `dst` has a different dtype than `src` (False when a dtype is unknown)."""
+        src_val = src.meta.get("val", None)
+        dst_val = dst.meta.get("val", None)
+        if not isinstance(src_val, torch.Tensor) or not isinstance(dst_val, torch.Tensor):
+            return False
+        return src_val.dtype != dst_val.dtype
+
     def _try_remove_regular_redundant_to_copy(self, node, graph):
         """
         Try to remove redundant regular to_copy operations with pattern to_copy1 -> to_copy2 with opposite memory formats
         """
         input_node = node.args[0]
+
+        # A _to_copy that also changes the dtype (e.g. fp32 -> bf16) is not a redundant copy: removing it
+        # would silently drop the conversion. These nodes are serialized as XNNPACK convert nodes
+        # (see ConvertMemoryFormat in operators/op_to_copy.py).
+        if self._changes_dtype(input_node, node):
+            return False
 
         # Check if input is a to_copy with opposite memory format
         if (
@@ -31,6 +46,8 @@ class RemoveRedundantCopyPass(XNNPACKPass):
             and ChannelsLastTaggedReshapePass.is_nchw_node(input_node)
             != ChannelsLastTaggedReshapePass.is_nchw_node(node)
             and len(input_node.users) == 1
+            # Dropping both copies must not drop a dtype conversion done by the first one either.
+            and not self._changes_dtype(input_node.args[0], node)
         ):  # Ensure the first copy has no other users
 
             # Get the original input (before the first to_copy)

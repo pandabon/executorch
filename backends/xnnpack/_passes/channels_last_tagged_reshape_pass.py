@@ -113,6 +113,21 @@ class ChannelsLastTaggedReshapePass(XNNPACKPass):
     def mark_as_nchw_node(node: torch.fx.Node) -> None:
         node.meta[ChannelsLastTaggedReshapePass.XNN_NHWC_NODE] = False
 
+    @staticmethod
+    def _changes_dtype(node: torch.fx.Node) -> bool:
+        """
+        A _to_copy that changes the dtype (fp32 <-> bf16, an XNNPACK convert node) keeps the memory
+        format of its input, so it is tagged like any layout-agnostic op instead of by its
+        memory_format kwarg.
+        """
+        in_val = node.args[0].meta.get("val", None)
+        out_val = node.meta.get("val", None)
+        return (
+            isinstance(in_val, torch.Tensor)
+            and isinstance(out_val, torch.Tensor)
+            and in_val.dtype != out_val.dtype
+        )
+
     def tag_node(self, node: torch.fx.Node) -> None:
         if node.kwargs["memory_format"] == torch.channels_last:
             self.mark_as_nhwc_node(node)
@@ -562,7 +577,9 @@ class ChannelsLastTaggedReshapePass(XNNPACKPass):
                 # The node requires nchw inputs
                 for input_node in node.all_input_nodes:
                     self.input_to_nchw(graph_module, input_node, node)
-            elif node.target == exir_ops.edge.aten._to_copy.default:
+            elif node.target == exir_ops.edge.aten._to_copy.default and not (
+                self._changes_dtype(node)
+            ):
                 self.tag_node(node)
             else:
                 # The node can have inputs in any format (but all must be the

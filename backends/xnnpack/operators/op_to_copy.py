@@ -16,6 +16,7 @@ from executorch.backends.xnnpack.operators.node_visitor import (
 from executorch.backends.xnnpack.operators.quant_params import QuantParams
 
 from executorch.backends.xnnpack.serialization.xnnpack_graph_schema import (
+    XNNConvert,
     XNNGraph,
     XNNStaticTranspose,
     XNode,
@@ -35,6 +36,46 @@ class ConvertMemoryFormat(NodeVisitor):
     def __init__(self, *args) -> None:
         super().__init__(*args)
 
+    def _define_dtype_convert(
+        self,
+        node: torch.fx.Node,
+        xnn_graph: XNNGraph,
+        vals_to_ids: Dict[torch.fx.Node, int],
+        debug_handle: int,
+    ) -> None:
+        """
+        Serialize an fp32 <-> bf16 `_to_copy` as an XNNPACK convert node (runtime:
+        defineConvertNode in runtime/XNNCompiler.cpp -> xnn_define_convert). The partitioner
+        (ToDimOrderCopyConfig) only lets these two dtype pairs with an unchanged dim order
+        through, so the layout is the same on both sides and no transpose is needed.
+        """
+        input_node = get_input_node(node, 0)
+        input_dtype = input_node.meta["val"].dtype
+        output_dtype = node.meta["val"].dtype
+        check_or_raise(
+            {input_dtype, output_dtype} == {torch.float32, torch.bfloat16},
+            f"XNNPACK convert supports only fp32 <-> bf16, got {input_dtype} -> {output_dtype}",
+        )
+        check_or_raise(
+            node.kwargs.get("memory_format", torch.contiguous_format)
+            in (torch.contiguous_format, torch.preserve_format),
+            "XNNPACK convert does not change the memory format",
+        )
+
+        self.define_tensor(input_node, xnn_graph, vals_to_ids)
+        self.define_tensor(node, xnn_graph, vals_to_ids)
+
+        xnn_graph.xnodes.append(
+            XNode(
+                xnode_union=XNNConvert(
+                    input_id=vals_to_ids[input_node],
+                    output_id=vals_to_ids[node],
+                    flags=0,
+                ),
+                debug_handle=debug_handle,
+            )
+        )
+
     def define_node(
         self,
         node: torch.fx.Node,
@@ -42,6 +83,12 @@ class ConvertMemoryFormat(NodeVisitor):
         vals_to_ids: Dict[torch.fx.Node, int],
         debug_handle: int,
     ) -> None:
+        input_dtype = get_input_node(node, 0).meta["val"].dtype
+        if input_dtype != node.meta["val"].dtype:
+            # A dtype conversion (the partitioner only lets fp32 <-> bf16 through): XNNPACK convert node.
+            self._define_dtype_convert(node, xnn_graph, vals_to_ids, debug_handle)
+            return
+
         memory_format_target = node.kwargs.get("memory_format", torch.contiguous_format)
         to_channels_last = bool(memory_format_target == torch.channels_last)
         to_contiguous = bool(memory_format_target == torch.contiguous_format)
@@ -89,3 +136,4 @@ class ConvertMemoryFormat(NodeVisitor):
             debug_handle=debug_handle,
         )
         xnn_graph.xnodes.append(ser_node)
+

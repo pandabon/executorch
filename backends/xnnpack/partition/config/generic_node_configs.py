@@ -610,7 +610,10 @@ class ToDimOrderCopyConfig(GenericNodePartitionerConfig):
 
     def check_constraints(self, node: torch.fx.Node, ep: ExportedProgram) -> bool:
         """
-        Only support dim order conversion partitioning, not DType conversions
+        Support dim order conversion partitioning, and (only when bf16 is enabled) the
+        fp32 <-> bf16 dtype conversions, which XNNPACK runs as a convert node
+        (xnn_define_convert; see ConvertDtypeVisitor in operators/op_to_copy.py).
+        Any other dtype conversion is not supported.
         """
         if not self.check_common_constraints(node, ep):
             return False
@@ -620,13 +623,30 @@ class ToDimOrderCopyConfig(GenericNodePartitionerConfig):
         input_dtype = input_node.meta["val"].dtype
         output_dtype = node.meta["val"].dtype
 
-        # Return False if doing dtype conversion
         if input_dtype != output_dtype:
-            why(
-                node,
-                reason=f"dtype conversion from {input_dtype} to {output_dtype} is not supported",
-            )
-            return False
+            # XNNPACK has convert operators for exactly these two directions.
+            xnn_convert_dtypes = {
+                (torch.float32, torch.bfloat16),
+                (torch.bfloat16, torch.float32),
+            }
+            if not (
+                self.enable_bf16 and (input_dtype, output_dtype) in xnn_convert_dtypes
+            ):
+                why(
+                    node,
+                    reason=f"dtype conversion from {input_dtype} to {output_dtype} is not supported",
+                )
+                return False
+
+            # The convert node does not permute memory, so the dim order must not change.
+            dim_order = node.kwargs.get("dim_order", None)
+            input_dim_order = list(input_node.meta["val"].dim_order())
+            if dim_order is not None and list(dim_order) != input_dim_order:
+                why(
+                    node,
+                    reason=f"dtype conversion together with a dim order change ({input_dim_order} -> {list(dim_order)}) is not supported",
+                )
+                return False
 
         return True
 
