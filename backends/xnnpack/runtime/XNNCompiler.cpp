@@ -1709,8 +1709,46 @@ Error defineBatchMatrixMultiplyNode(
   REMAP_ID(remapped_ids, graph_node->input2_id(), bmm_in2);
   REMAP_ID(remapped_ids, graph_node->output_id(), bmm_out);
 
+  // Same situation as the bf16 fully-connected in defineFullyConnectedNode above
+  // (this code mirrors it, i.e. the upstream ExecuTorch v1.5.1 code at
+  // XNNCompiler.cpp:840-899): XNNPACK only provides a bf16 batch matmul of type
+  // bf16_f32 (bf16 x bf16 -> fp32 output). When the serialized graph asks for a
+  // bf16 output, define the matmul with an fp32 intermediate output and append
+  // a convert (fp32 -> bf16), so the delegate boundary stays bf16.
+  const auto* in1_tv = getSerializedTensorValue(graph, graph_node->input1_id());
+  const auto* in2_tv = getSerializedTensorValue(graph, graph_node->input2_id());
+  const auto* out_tv = getSerializedTensorValue(graph, graph_node->output_id());
+  const bool needs_bf16_output_convert = in1_tv != nullptr &&
+      in2_tv != nullptr && out_tv != nullptr &&
+      in1_tv->datatype() == DataType::xnn_datatype_bf16 &&
+      in2_tv->datatype() == DataType::xnn_datatype_bf16 &&
+      out_tv->datatype() == DataType::xnn_datatype_bf16;
+
+  uint32_t bmm_compute_out = bmm_out;
+  if (needs_bf16_output_convert) {
+    std::vector<size_t> out_dims =
+        flatbufferDimsToVector<size_t>(out_tv->dims());
+    uint32_t intermediate_id = XNN_INVALID_VALUE_ID;
+    xnn_status ts = xnn_define_tensor_value(
+        subgraph_ptr,
+        xnn_datatype_fp32,
+        out_dims.size(),
+        out_dims.data(),
+        /*data=*/nullptr,
+        /*external_id=*/XNN_INVALID_VALUE_ID,
+        /*flags=*/0,
+        &intermediate_id);
+    ET_CHECK_OR_RETURN_ERROR(
+        ts == xnn_status_success,
+        Internal,
+        "Failed to define fp32 intermediate for bf16 BMM node %i: %s",
+        node->debug_handle(),
+        xnn_status_to_string(ts));
+    bmm_compute_out = intermediate_id;
+  }
+
   xnn_status status = xnn_define_batch_matrix_multiply(
-      subgraph_ptr, bmm_in1, bmm_in2, bmm_out, graph_node->flags());
+      subgraph_ptr, bmm_in1, bmm_in2, bmm_compute_out, graph_node->flags());
 
   ET_CHECK_OR_RETURN_ERROR(
       status == xnn_status_success,
@@ -1718,6 +1756,17 @@ Error defineBatchMatrixMultiplyNode(
       "Failed to create BMM node %i with code: %s",
       node->debug_handle(),
       xnn_status_to_string(status));
+
+  if (needs_bf16_output_convert) {
+    xnn_status cs = xnn_define_convert(
+        subgraph_ptr, bmm_compute_out, bmm_out, /*flags=*/0);
+    ET_CHECK_OR_RETURN_ERROR(
+        cs == xnn_status_success,
+        Internal,
+        "Failed to define bf16 output convert for BMM node %i: %s",
+        node->debug_handle(),
+        xnn_status_to_string(cs));
+  }
 
   return Error::Ok;
 }
