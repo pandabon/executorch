@@ -9,7 +9,7 @@
 #include <executorch/backends/xnnpack/runtime/XNNWeightsCache.h>
 #include <executorch/runtime/core/error.h>
 #include <executorch/runtime/core/memory_allocator.h>
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ZEPHYR__)
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/mman.h>
@@ -23,6 +23,10 @@
 #include <string>
 #include <vector>
 
+// Zephyr (like Windows) has no flock()/pread()/pwrite() and no file-backed mmap, so the on-disk
+// packed-weights cache below is compiled out there and weights are packed on the heap.
+// (The 1.0.1 fork did this by commenting code out: pandabon/zephyr-chipyard-sw
+// third-party/executorch commit 0ba9c549b, XNNWeightsCache.cpp.)
 namespace executorch {
 namespace backends {
 namespace xnnpack {
@@ -48,7 +52,7 @@ XNNWeightsCache::XNNWeightsCache() {
 }
 
 XNNWeightsCache::~XNNWeightsCache() {
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ZEPHYR__)
   for (auto& region : mmap_regions_) {
     if (region.addr != nullptr && region.addr != MAP_FAILED) {
       munmap(region.addr, region.size);
@@ -76,7 +80,7 @@ static T read_le(const uint8_t* src) {
   return value;
 }
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ZEPHYR__)
 // Open the cache file and take an advisory exclusive lock. Returns the
 // fd, or -1 if open/flock failed (logs the failure). The caller decides
 // how to recover (typically: skip the mmap path for this init).
@@ -227,7 +231,7 @@ Error XNNWeightsCache::initialize_for_runtime(
   unpacked_data_.clear();
   unpacked_data_to_name_.clear();
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ZEPHYR__)
   if (packed_cache_path_.empty() || packed_file_fd_ >= 0) {
     return Error::Ok;
   }
@@ -354,7 +358,7 @@ Result<std::vector<std::string>> XNNWeightsCache::finalize_for_runtime() {
     }
   }
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ZEPHYR__)
   // Synchronous flush for newly added regions. MS_SYNC blocks until the
   // dirty pages are written to disk and marked clean
   if (mmap_regions_.size() > mmap_regions_synced_) {
@@ -400,7 +404,7 @@ Result<const uint8_t*> XNNWeightsCache::load_unpacked_data(
 
 void XNNWeightsCache::release_entry(void* packed_data_ptr) {
   packed_pointer_to_container_.erase(packed_data_ptr);
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ZEPHYR__)
   // Per-entry file-backed mmap region: munmap to release VM. The
   // packed_data_ptrs_ slot is nulled by the caller so existing offsets
   // stay valid.
@@ -418,7 +422,7 @@ void XNNWeightsCache::release_entry(void* packed_data_ptr) {
 }
 
 void XNNWeightsCache::full_unload() {
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ZEPHYR__)
   for (auto& region : mmap_regions_) {
     if (region.addr != nullptr && region.addr != MAP_FAILED) {
       munmap(region.addr, region.size);
@@ -520,7 +524,7 @@ size_t XNNWeightsCache::look_up(
 }
 
 void* XNNWeightsCache::reserve_space(XNNWeightsCache* context, size_t n) {
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ZEPHYR__)
   // XNNPACK also re-packs for a different runtime context by calling
   // reserve_space with no preceding look_up, so consume the flag here:
   // only the re-pack directly following a seed-mismatch look_up may take
@@ -605,7 +609,9 @@ void* XNNWeightsCache::reserve_space(XNNWeightsCache* context, size_t n) {
 }
 
 void* XNNWeightsCache::reserve_space_heap(size_t n) {
+#if defined(__cpp_exceptions)
   try {
+#endif
     size_t raw_allocation_size = n + kPackedAllocationAlignment - 1;
     std::unique_ptr<char[]> data_container(new char[raw_allocation_size]);
 
@@ -620,6 +626,7 @@ void* XNNWeightsCache::reserve_space_heap(size_t n) {
 
     packed_pointer_to_container_[aligned_space] = std::move(data_container);
     return aligned_space;
+#if defined(__cpp_exceptions)
   } catch (std::bad_alloc& e) {
     ET_LOG(
         Error,
@@ -628,6 +635,7 @@ void* XNNWeightsCache::reserve_space_heap(size_t n) {
         e.what());
     return nullptr;
   }
+#endif
 }
 
 size_t XNNWeightsCache::look_up_or_insert(
@@ -702,7 +710,7 @@ void XNNWeightsCache::set_packed_cache_path(const std::string& path) {
 }
 
 Error XNNWeightsCache::save_packed_index() {
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ZEPHYR__)
   if (packed_file_fd_ < 0) {
     return Error::Ok;
   }
@@ -804,7 +812,7 @@ Error XNNWeightsCache::save_packed_index() {
 }
 
 bool XNNWeightsCache::load_packed_cache() {
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ZEPHYR__)
   int fd = open(packed_cache_path_.c_str(), O_RDONLY);
   if (fd < 0) {
     return false;
