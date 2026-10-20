@@ -127,13 +127,20 @@ void ThreadPool::run(
 ThreadPool* get_threadpool() {
   executorch::runtime::runtime_init();
 
+#if !defined(__ZEPHYR__)
+  // cpuinfo has no Zephyr support (its CMake builds an empty stub), so on Zephyr the thread
+  // count below is fixed instead of being probed.
   if (!cpuinfo_initialize()) {
     ET_LOG(Error, "cpuinfo initialization failed");
     return nullptr; // NOLINT(facebook-hte-NullableReturn)
   }
+#endif
 
   static const int num_threads = ([]() {
-#if defined(EXECUTORCH_THREADPOOL_USE_ALL_LOGICAL_CORES)
+#if defined(__ZEPHYR__)
+    // One hart on Penguin: a single-thread pool, no worker threads are spawned.
+    auto result = 1u;
+#elif defined(EXECUTORCH_THREADPOOL_USE_ALL_LOGICAL_CORES)
     // Use threads=cores.
     auto result = cpuinfo_get_processors_count();
 #else

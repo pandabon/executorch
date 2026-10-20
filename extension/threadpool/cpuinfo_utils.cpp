@@ -6,6 +6,17 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#if defined(__ZEPHYR__)
+// No cpuinfo on Zephyr (see threadpool.cpp): this file's logic needs <fstream>, std::once_flag
+// and a working cpuinfo, none of which exist there. Nothing calls this on Zephyr.
+#include <executorch/extension/threadpool/cpuinfo_utils.h>
+
+namespace executorch::extension::cpuinfo {
+uint32_t get_num_performant_cores() {
+  return 1;
+}
+} // namespace executorch::extension::cpuinfo
+#else
 #include <c10/util/irange.h>
 #include <executorch/extension/threadpool/cpuinfo_utils.h>
 
@@ -198,3 +209,5 @@ uint32_t get_num_performant_cores() {
 }
 
 } // namespace executorch::extension::cpuinfo
+
+#endif // __ZEPHYR__
