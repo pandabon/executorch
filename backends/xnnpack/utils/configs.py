@@ -9,6 +9,9 @@ from typing import List
 
 import executorch.exir as exir
 
+from executorch.backends.xnnpack._passes.patchify_conv_to_linear_pass import (
+    PatchifyConvToLinearPass,
+)
 from executorch.backends.xnnpack._passes.remove_noop_expand_copy_pass import (
     RemoveNoopExpandCopyPass,
 )
@@ -25,7 +28,7 @@ def get_xnnpack_edge_compile_config(
 
 
 def get_transform_passes(additional_passes=None) -> List[PassType]:
-    passes = [RemoveNoopExpandCopyPass()]
+    passes = [RemoveNoopExpandCopyPass(), PatchifyConvToLinearPass()]
     if additional_passes:
         passes.extend(additional_passes)
     return passes
