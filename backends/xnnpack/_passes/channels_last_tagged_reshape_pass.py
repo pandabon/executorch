@@ -19,7 +19,10 @@ from executorch.backends.xnnpack.utils.quant_utils import (
     is_tagged_as_implicit_q_dq,
     tag_as_implicit_q_dq,
 )
-from executorch.backends.xnnpack.utils.utils import is_param_node
+from executorch.backends.xnnpack.utils.utils import (
+    is_global_avg_pool_mean,
+    is_param_node,
+)
 from executorch.exir.dialects._ops import ops as exir_ops
 from executorch.exir.pass_base import PassResult
 
@@ -189,6 +192,10 @@ class ChannelsLastTaggedReshapePass(XNNPACKPass):
         return ChannelsLastTaggedReshapePass._is_nhwc_tensor(tensor)
 
     def requires_nhwc_input(self, node: torch.fx.Node) -> bool:
+        if node.target == exir_ops.edge.aten.mean.dim:
+            # Only the global-average-pooling form (rank 4, dims [2, 3]) is NHWC-sensitive;
+            # any other mean is serialized as a static mean on the NCHW tensor as it is.
+            return is_global_avg_pool_mean(node)
         return node.target in self.memory_sensitive_ops_nhwc
 
     def requires_nchw_inputs(self, node: torch.fx.Node) -> bool:

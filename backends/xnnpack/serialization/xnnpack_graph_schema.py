@@ -194,6 +194,14 @@ class XNNBatchMatrixMultiply(XNNNode2x1):
 
 
 @dataclass
+class XNNStaticMean:
+    reduction_axes: List[int]
+    input_id: int
+    output_id: int
+    flags: int
+
+
+@dataclass
 class XNNStaticTranspose:
     num_dims: int
     perm: List[int]
@@ -427,6 +435,7 @@ XNodeUnion = Union[
     XNNCopy,
     XNNCos,
     XNNApproxGelu,
+    XNNStaticMean,
 ]
 
 

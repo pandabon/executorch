@@ -156,6 +156,7 @@ union XNodeUnion {
   XNNCopy: _XNNNode1x1,
   XNNCos: _XNNNode1x1,
   XNNApproxGelu: _XNNNode1x1,
+  XNNStaticMean,
 }
 
 union XValueUnion {
@@ -177,6 +178,13 @@ table XNode {
 
 table XValue {
   xvalue_union:XValueUnion;
+}
+
+table XNNStaticMean {
+  reduction_axes:[uint];
+  input_id:uint;
+  output_id:uint;
+  flags:uint;
 }
 
 table XNNStaticTranspose {

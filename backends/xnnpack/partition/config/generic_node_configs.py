@@ -659,22 +659,18 @@ class MeanDimConfig(GenericNodePartitionerConfig):
 
     def check_constraints(self, node: torch.fx.Node, ep: ExportedProgram) -> bool:
         """
-        Mean Dim currently only supports averaging 4D tensors across the innermost
-        dimensions
+        Two forms are delegated:
+          * a rank-4 tensor averaged over its innermost dims [2, 3], keepdim
+            (XNNPACK global average pooling);
+          * a mean over the last dim only, keepdim, any rank (XNNPACK static mean on
+            the tensor as it is; RMSNorm / LayerNorm statistics).
         """
         if not self.check_common_constraints(node, ep):
             return False
 
         input_rank = get_input_node(node, 0).meta["val"].dim()
-        if input_rank != 4:
-            why(
-                node,
-                reason=f"mean.dim only supports averaging 4D tensors, got tensor of rank {input_rank}",
-            )
-            return False
 
-        # This path lowers mean.dim to XNNPACK Global Average Pooling, which
-        # cannot encode an explicit dtype override.
+        # Neither path can encode an explicit dtype override.
         if node.kwargs.get("dtype") is not None:
             why(node, reason="mean.dim does not support dtype")
             return False
@@ -686,18 +682,20 @@ class MeanDimConfig(GenericNodePartitionerConfig):
             why(node, reason=f"mean.dim has invalid dims: {error}")
             return False
 
-        if sorted(dims) != [2, 3]:
-            why(
-                node,
-                reason="mean.dim only supports averaging 4D tensors across the innermost dimensions",
-            )
-            return False
-
         if not keepdim:
             why(node, reason="mean.dim only supports keepdim=True")
             return False
 
-        return True
+        if input_rank == 4 and sorted(dims) == [2, 3]:
+            return True
+        if dims == [input_rank - 1]:
+            return True
+
+        why(
+            node,
+            reason="mean.dim only supports averaging 4D tensors across dims [2, 3] or any tensor across its last dim",
+        )
+        return False
 
     def supported_precision_types(self) -> List[ConfigPrecisionType]:
         return [ConfigPrecisionType.FP32, ConfigPrecisionType.STATIC_QUANT]

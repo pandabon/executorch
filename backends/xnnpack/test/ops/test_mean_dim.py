@@ -55,14 +55,23 @@ class TestMeanDim(unittest.TestCase):
         inputs = (torch.randn(1, 5, 4, 4),)
         self._test_mean_dim(inputs, dims=(2, 3))
 
-    def test_fp32_mean_dim_unsupported(self):
+    def test_fp32_mean_dim_last_dim(self):
         """
-        XNNPack mean.dim implementation only supports innermost two dimensions. As such,
-        we expect it to fail to partition when dim=(3).
+        A mean over the last dim alone is not global average pooling, it is delegated
+        as an XNNPACK static mean on the tensor as it is. (Before, this was the case
+        that was expected NOT to partition.)
+        """
+        inputs = (torch.randn(1, 5, 4, 4),)
+        self._test_mean_dim(inputs, dims=(3))
+
+    def test_fp32_mean_dim_unsupported_middle_dim(self):
+        """
+        Only the innermost two dims (global average pooling) or the last dim alone are
+        supported, so a mean over dim 2 of a 4D tensor stays a portable op.
         """
         inputs = (torch.randn(1, 5, 4, 4),)
         (
-            Tester(self.MeanDim((3)), inputs)
+            Tester(self.MeanDim((2)), inputs)
             .export()
             .check_count({"torch.ops.aten.mean.dim": 1})
             .to_edge_transform_and_lower()
@@ -71,7 +80,7 @@ class TestMeanDim(unittest.TestCase):
 
     def test_fp32_mean_dim_unsupported_3d(self):
         """
-        XNNPack mean.dim implementation only supports 4D tensors.
+        XNNPack mean.dim over two dims (global average pooling) only supports 4D tensors.
         """
         inputs = (torch.randn(1, 5, 4),)
         (

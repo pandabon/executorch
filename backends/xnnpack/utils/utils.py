@@ -74,6 +74,28 @@ def normalize_mean_dims(mean_dims: Sequence[int] | int | None, rank: int) -> Lis
     return normalized_dims
 
 
+def is_global_avg_pool_mean(node: torch.fx.Node) -> bool:
+    """True for mean.dim over dims [2, 3] of a rank-4 tensor, the form that is lowered to
+    XNNPACK global average pooling (which runs on NHWC data)."""
+    rank = node.args[0].meta["val"].dim()
+    if rank != 4:
+        return False
+    try:
+        return sorted(normalize_mean_dims(node.args[1], rank)) == [2, 3]
+    except ValueError:
+        return False
+
+
+def is_last_dim_mean(node: torch.fx.Node) -> bool:
+    """True for mean.dim over the last dim only, whatever the rank (RMSNorm / LayerNorm
+    statistics). It is lowered to an XNNPACK static mean on the tensor as it is."""
+    rank = node.args[0].meta["val"].dim()
+    try:
+        return normalize_mean_dims(node.args[1], rank) == [rank - 1]
+    except ValueError:
+        return False
+
+
 def normalize_pool2d_args(
     node: torch.fx.Node, has_dilation: bool
 ) -> Tuple[List[int], List[int], List[int], List[int]]:

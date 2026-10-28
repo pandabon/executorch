@@ -17,19 +17,26 @@ from executorch.backends.xnnpack.operators.node_visitor import (
 from executorch.backends.xnnpack.serialization.xnnpack_graph_schema import (
     XNNGlobalAvgPooling2d,
     XNNGraph,
+    XNNStaticMean,
     XNode,
 )
-from executorch.backends.xnnpack.utils.utils import normalize_mean_dims
+from executorch.backends.xnnpack.utils.utils import (
+    is_global_avg_pool_mean,
+    is_last_dim_mean,
+    normalize_mean_dims,
+)
 from executorch.backends.xnnpack.utils.xnnpack_constants import XNN_FLAG_KEEP_DIMS
 
 
 @register_node_visitor
 class MeanDim(NodeVisitor):
     """
-    XNNPACK only supports the special case of mean.dim that can be lowered
-    to Global Average Pooling. The input tensor must be 4D, keepdim must be
-    True, and the reduced dimensions must normalize to [2, 3] (for example
-    [2, 3], [3, 2], [-1, -2], or [-2, -1]).
+    Two forms of mean.dim are supported, both with keepdim=True:
+      * Global Average Pooling: the input tensor is 4D and the reduced dimensions
+        normalize to [2, 3] (for example [2, 3], [3, 2], [-1, -2], or [-2, -1]).
+        It runs on NHWC data.
+      * Static mean over the last dim of a tensor of any rank (RMSNorm /
+        LayerNorm statistics). It runs on the tensor as it is (no layout change).
     """
 
     target = "aten.mean.dim"
@@ -44,14 +51,42 @@ class MeanDim(NodeVisitor):
         vals_to_ids: Dict[torch.fx.Node, int],
         debug_handle: int,
     ) -> None:
+        is_gap = is_global_avg_pool_mean(node)
         self.define_nodes_tensor_inputs_outputs(
-            node, xnn_graph, vals_to_ids, convert_to_nhwc=True
+            node, xnn_graph, vals_to_ids, convert_to_nhwc=is_gap
         )
         # input
         input_id = vals_to_ids[cast(torch.fx.Node, node.args[0])]
 
         # output
         output_id = vals_to_ids[node]
+
+        if not is_gap:
+            check_or_raise(
+                is_last_dim_mean(node),
+                "XNNPACK only supports mean.dim across the last dim or the innermost 2 dims of a 4D tensor",
+            )
+            check_or_raise(
+                node.kwargs.get("dtype") is None,
+                "XNNPACK does not support mean.dim with dtype",
+            )
+            check_or_raise(
+                len(node.args) == 3 and bool(node.args[2]),
+                "XNNPACK only supports mean.dim that keeps dims",
+            )
+            rank = node.args[0].meta["val"].dim()
+            xnn_graph.xnodes.append(
+                XNode(
+                    xnode_union=XNNStaticMean(
+                        reduction_axes=[rank - 1],
+                        input_id=input_id,
+                        output_id=output_id,
+                        flags=XNN_FLAG_KEEP_DIMS,
+                    ),
+                    debug_handle=debug_handle,
+                )
+            )
+            return
 
         input_shape = get_tensor_value(xnn_graph.xvalues[input_id]).dims
         check_or_raise(
