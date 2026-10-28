@@ -157,6 +157,7 @@ union XNodeUnion {
   XNNCos: _XNNNode1x1,
   XNNApproxGelu: _XNNNode1x1,
   XNNStaticMean,
+  XNNLayerNorm,
 }
 
 union XValueUnion {
@@ -183,6 +184,15 @@ table XValue {
 table XNNStaticMean {
   reduction_axes:[uint];
   input_id:uint;
+  output_id:uint;
+  flags:uint;
+}
+
+table XNNLayerNorm {
+  epsilon:float;
+  input_id:uint;
+  scale_id:uint;
+  bias_id:uint;
   output_id:uint;
   flags:uint;
 }

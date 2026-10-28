@@ -64,6 +64,7 @@ from executorch.backends.xnnpack.partition.config.generic_node_configs import (
 )
 from executorch.backends.xnnpack.partition.config.node_configs import (
     BatchNormConfig,
+    LayerNormConfig,
     MaxDimConfig,
     PreluConfig,
 )
@@ -97,6 +98,7 @@ ALL_PARTITIONER_CONFIGS: List[Type[XNNPartitionerConfig]] = [
     GeluConfig,
     HardtanhConfig,
     HardswishConfig,
+    LayerNormConfig,
     LeakyReLUConfig,
     LinearConfig,
     LogConfig,

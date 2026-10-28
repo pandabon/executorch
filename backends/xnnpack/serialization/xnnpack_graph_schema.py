@@ -202,6 +202,16 @@ class XNNStaticMean:
 
 
 @dataclass
+class XNNLayerNorm:
+    epsilon: float
+    input_id: int
+    scale_id: int
+    bias_id: int
+    output_id: int
+    flags: int
+
+
+@dataclass
 class XNNStaticTranspose:
     num_dims: int
     perm: List[int]
@@ -436,6 +446,7 @@ XNodeUnion = Union[
     XNNCos,
     XNNApproxGelu,
     XNNStaticMean,
+    XNNLayerNorm,
 ]
 
 

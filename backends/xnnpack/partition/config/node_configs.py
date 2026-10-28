@@ -66,6 +66,73 @@ class BatchNormConfig(XNNPartitionerConfig):
         return [ConfigPrecisionType.FP32]
 
 
+class LayerNormConfig(XNNPartitionerConfig):
+    """
+    aten.native_layer_norm over the last dim with static weight and bias (f32 and bf16).
+
+    native_layer_norm returns (output, mean, rstd); only output 0 may be used, because
+    the XNNPACK layer norm node produces just the normalized tensor. The node must have
+    exactly one user, that getitem.
+    """
+
+    target_name = "native_layer_norm.default"
+
+    def check_constraints(self, node: torch.fx.Node, ep: ExportedProgram) -> bool:
+        if not self.check_common_constraints(node, ep):
+            return False
+
+        # args: (input, normalized_shape, weight, bias, eps)
+        if len(node.args) != 5:
+            why(node, "expected (input, normalized_shape, weight, bias, eps)")
+            return False
+        input_node, normalized_shape, weight, bias, _eps = node.args
+
+        input_val = input_node.meta.get("val")  # pyre-ignore
+        if input_val is None or input_val.dtype not in (torch.float32, torch.bfloat16):
+            why(node, "layer norm input must be float32 or bfloat16")
+            return False
+
+        # XNNPACK normalizes the last dim only.
+        if (
+            len(normalized_shape) != 1  # pyre-ignore
+            or input_val.dim() < 1
+            or normalized_shape[0] != input_val.shape[-1]
+        ):
+            why(node, f"only normalization over the last dim is supported, got {normalized_shape}")
+            return False
+
+        # Static weight and bias of the input dtype.
+        for name, arg in (("weight", weight), ("bias", bias)):
+            if not isinstance(arg, torch.fx.Node) or not is_param_node(ep, arg):
+                why(node, f"layer norm {name} must be a static parameter")
+                return False
+            val = arg.meta.get("val")
+            if val is None or val.dtype != input_val.dtype or val.dim() != 1:
+                why(node, f"layer norm {name} must be 1D and of the input dtype")
+                return False
+
+        # Only the first output is produced by the XNNPACK node: the one user must be getitem(0).
+        users = list(node.users)
+        if not (
+            len(users) == 1
+            and users[0].target == operator.getitem
+            and users[0].args[1] == 0
+        ):
+            why(node, "layer norm mean/rstd outputs are not supported")
+            return False
+
+        return True
+
+    def get_node_and_deps(
+        self, node: torch.fx.Node, ep: ExportedProgram
+    ) -> List[torch.fx.Node]:
+        # node, weight, bias and the getitem(0) users
+        return [node, node.args[2], node.args[3]] + list(node.users.keys())  # pyre-ignore
+
+    def supported_precision_types(self) -> List[ConfigPrecisionType]:
+        return [ConfigPrecisionType.FP32]
+
+
 class MaxDimConfig(XNNPartitionerConfig):
     target_name = "max.dim"
 

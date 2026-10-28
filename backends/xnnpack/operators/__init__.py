@@ -28,6 +28,7 @@ from . import (  # noqa
     op_gelu,
     op_hardswish,
     op_hardtanh,
+    op_layer_norm,
     op_leaky_relu,
     op_linear,
     op_log,
