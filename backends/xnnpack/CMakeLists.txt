@@ -71,6 +71,15 @@ else()
   set(MV_COMMAND mv ${_xnnpack_flatbuffer__outputs} ${_xnnpack_schema__outputs})
 endif()
 
+# Absolute paths of the .fbs files, so a schema edit re-runs flatc below.
+set(_xnnpack_schema__srcs_abs)
+foreach(fbs_file ${_xnnpack_schema__srcs})
+  cmake_path(ABSOLUTE_PATH fbs_file BASE_DIRECTORY "${EXECUTORCH_ROOT}"
+             OUTPUT_VARIABLE fbs_abs
+  )
+  list(APPEND _xnnpack_schema__srcs_abs "${fbs_abs}")
+endforeach()
+
 # Generate the headers from the .fbs files.
 add_custom_command(
   OUTPUT ${_xnnpack_schema__outputs}
@@ -80,7 +89,7 @@ add_custom_command(
     ${_xnnpack_schema__srcs}
   COMMAND ${MV_COMMAND}
   WORKING_DIRECTORY ${EXECUTORCH_ROOT}
-  DEPENDS flatc
+  DEPENDS flatc ${_xnnpack_schema__srcs_abs}
   COMMENT "Generating xnnpack_schema headers"
   VERBATIM
 )
