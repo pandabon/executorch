@@ -203,10 +203,6 @@ class XnnpackBackend final
         lock_weights_cache = std::unique_lock<std::mutex>(cache->mutex());
       }
 
-#ifdef ENABLE_XNNPACK_PROFILING
-      executor->print_avg_op_timings();
-#endif
-
       if (cache && executor->uses_weight_cache()) {
         cache->delete_packed_data(executor->get_packed_data_names());
       }
