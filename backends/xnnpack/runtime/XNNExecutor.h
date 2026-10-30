@@ -106,7 +106,8 @@ class XNNExecutor {
       xnn_runtime_t runtime,
       std::vector<uint32_t>&& input_ids,
       std::vector<uint32_t>&& output_ids,
-      std::vector<std::string>&& packed_data_names);
+      std::vector<std::string>&& packed_data_names,
+      std::vector<uint32_t>&& xnn_node_to_serialized_node = {});
 
   /**
    * Prepares the arguments for runtime graph execution.

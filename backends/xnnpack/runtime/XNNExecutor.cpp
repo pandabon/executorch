@@ -53,11 +53,13 @@ ET_NODISCARD Error XNNExecutor::initialize(
     xnn_runtime_t runtime,
     std::vector<uint32_t>&& input_ids,
     std::vector<uint32_t>&& output_ids,
-    std::vector<std::string>&& packed_data_names) {
+    std::vector<std::string>&& packed_data_names,
+    std::vector<uint32_t>&& xnn_node_to_serialized_node) {
   runtime_ = std::unique_ptr<xnn_runtime, decltype(&xnn_delete_runtime)>(
       runtime, xnn_delete_runtime);
 
-  auto error = profiler_.initialize(runtime);
+  auto error = profiler_.initialize(
+      runtime, std::move(xnn_node_to_serialized_node));
   if (error != Error::Ok) {
     ET_LOG(
         Error,

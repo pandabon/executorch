@@ -20,6 +20,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <utility>
 // NOLINTEND
 
 namespace executorch::backends::xnnpack::delegate::profiling {
@@ -32,12 +33,16 @@ using executorch::runtime::EventTracer;
 XNNProfiler::XNNProfiler()
     : state_(XNNProfilerState::Uninitialized), run_count_(0) {}
 
-Error XNNProfiler::initialize(xnn_runtime_t runtime) {
+Error XNNProfiler::initialize(
+    xnn_runtime_t runtime,
+    std::vector<uint32_t>&& xnn_node_to_serialized_node) {
   runtime_ = runtime;
+  xnn_node_to_serialized_node_ = std::move(xnn_node_to_serialized_node);
 
   // Fetch the runtime operator information from XNNPACK.
   ET_CHECK_OK_OR_RETURN_ERROR(get_runtime_num_operators());
   ET_CHECK_OK_OR_RETURN_ERROR(get_runtime_operator_names());
+  ET_CHECK_OK_OR_RETURN_ERROR(get_runtime_operator_node_ids());
 
   state_ = XNNProfilerState::Ready;
 
@@ -124,6 +129,25 @@ Error XNNProfiler::get_runtime_operator_names() {
 
   if (status != xnn_status_success) {
     ET_LOG(Error, "Failed to get XNNPACK operator names: %d", status);
+    return Error::Internal;
+  }
+
+  return Error::Ok;
+}
+
+Error XNNProfiler::get_runtime_operator_node_ids() {
+  size_t required_size = 0;
+
+  op_node_ids_.resize(op_count_);
+  xnn_status status = xnn_get_runtime_profiling_info(
+      runtime_,
+      xnn_profile_info_operator_node_id,
+      op_node_ids_.size() * sizeof(uint32_t),
+      op_node_ids_.data(),
+      &required_size);
+
+  if (status != xnn_status_success) {
+    ET_LOG(Error, "Failed to get XNNPACK operator node ids: %d", status);
     return Error::Internal;
   }
 
@@ -226,6 +250,19 @@ void XNNProfiler::submit_trace() {
 
     auto end_time = time + interval_ticks;
 
+    // The event carries either a name or an id, not both, and the Inspector
+    // merges events with the same id, so the name is kept (it is unique) and
+    // tagged with "[n<index>]", the index of the serialized node the operator
+    // came from. The Inspector finds the delegate map key "[n<index>]" inside
+    // the name and so links the operator to the ATen ops of that node. Operators
+    // from no serialized node (inserted by XNNPACK) keep the plain name.
+    const uint32_t node_id = op_node_ids_[i];
+    if (node_id < xnn_node_to_serialized_node_.size()) {
+      name_formatted = "[n" +
+          std::to_string(xnn_node_to_serialized_node_[node_id]) + "] " +
+          name_formatted;
+    }
+
     executorch::runtime::event_tracer_log_profiling_delegate(
         event_tracer_,
         name_formatted.c_str(),
@@ -246,8 +283,11 @@ void XNNProfiler::submit_trace() {
 // Stub implementation for when profiling is disabled.
 XNNProfiler::XNNProfiler() {}
 
-Error XNNProfiler::initialize(xnn_runtime_t runtime) {
+Error XNNProfiler::initialize(
+    xnn_runtime_t runtime,
+    std::vector<uint32_t>&& xnn_node_to_serialized_node) {
   (void)runtime;
+  (void)xnn_node_to_serialized_node;
   return Error::Ok;
 }
 

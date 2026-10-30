@@ -35,6 +35,7 @@ from executorch.exir.backend.backend_details import (
     CompileSpec,
     PreprocessResult,
 )
+from executorch.exir.backend.utils import DelegateMappingBuilder
 from executorch.exir.verification.verifier import EXIREdgeDialectVerifier
 from torch.export.exported_program import ExportedProgram
 
@@ -163,16 +164,28 @@ class XnnpackBackend(BackendDetails):
         constant_data_bytes = bytearray()
         node_visitors = get_node_visitors(ep, node_to_external_map, named_data_store)
 
+        # The runtime tags each profiled XNNPACK operator with "[n<index>]", the
+        # index of the serialized node it came from, which is the identifier here.
+        delegate_mapping_builder = DelegateMappingBuilder()
+
         for node in graph_module.graph.nodes:
             if node.op == "call_function":
                 logger.info(f"Visiting: {node}, {node.target.__name__}")
                 if node.target.__name__ in node_visitors:
+                    first_xnode = len(xnnpack_graph.xnodes)
                     node_visitors[node.target.__name__].define_node(
                         node,
                         xnnpack_graph,
                         vals_to_ids,
                         node.meta.get("debug_handle", DEFAULT_DEBUG_HANDLE),
                     )
+                    handle = node.meta.get("debug_handle")
+                    if handle:
+                        end_xnode = len(xnnpack_graph.xnodes)
+                        for xnode_index in range(first_xnode, end_xnode):
+                            delegate_mapping_builder.insert_delegate_mapping_entry(
+                                handles=handle, identifier=f"[n{xnode_index}]"
+                            )
                 else:
                     raise RuntimeError(
                         f"For {node}, {node.op}:{node.target.__name__} is not supported in XNNPACK Delegate"
@@ -189,6 +202,6 @@ class XnnpackBackend(BackendDetails):
             processed_bytes=serialize_xnnpack_binary(
                 xnnpack_graph, constant_data_bytes
             ),
-            debug_handle_map={},
+            debug_handle_map=delegate_mapping_builder.get_delegate_mapping(),
             data_store_output=named_data_store.get_named_data_store_output(),
         )

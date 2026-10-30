@@ -2406,12 +2406,21 @@ ET_NODISCARD Error XNNCompiler::compileModel(
     }
   }
 
+  // Index of the serialized node that defined each XNNPACK node, indexed by
+  // XNNPACK node id, so the profiler can tell which node each operator is from.
+  std::vector<uint32_t> xnn_node_to_serialized_node;
+  uint32_t serialized_node_index = 0;
   for (auto node : *flatbuffer_graph->xnodes()) {
     err = getDefineNodeFunc(node->xnode_union_type())(
         subgraph.get(), remapped_ids, node, flatbuffer_graph);
     if (err != Error::Ok) {
       return err;
     }
+#if defined(ENABLE_XNNPACK_PROFILING) || defined(ET_EVENT_TRACER_ENABLED)
+    xnn_node_to_serialized_node.resize(
+        xnn_subgraph_get_num_nodes(subgraph.get()), serialized_node_index);
+#endif
+    serialized_node_index++;
   }
   uint32_t runtime_flags = 0;
 
@@ -2470,7 +2479,8 @@ ET_NODISCARD Error XNNCompiler::compileModel(
       runtime_ptr,
       std::move(input_ids),
       std::move(output_ids),
-      std::move(packed_weights_names));
+      std::move(packed_weights_names),
+      std::move(xnn_node_to_serialized_node));
 
   return err;
 };

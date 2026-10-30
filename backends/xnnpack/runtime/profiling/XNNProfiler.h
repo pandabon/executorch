@@ -29,8 +29,15 @@ class XNNProfiler {
   /**
    * Initialize the profiler. This must be called after model is
    * compiled and before calling begin_execution.
+   *
+   * xnn_node_to_serialized_node[i] is the index of the serialized node that
+   * defined XNNPACK node i. It lets the profiler tag each operator with the
+   * node it came from, which the AOT delegate mapping resolves to ATen ops.
+   * May be empty.
    */
-  executorch::runtime::Error initialize(xnn_runtime_t runtime);
+  executorch::runtime::Error initialize(
+      xnn_runtime_t runtime,
+      std::vector<uint32_t>&& xnn_node_to_serialized_node);
 
   /**
    * Start a new profiling session. This is typically invoked
@@ -54,6 +61,8 @@ class XNNProfiler {
 
   size_t op_count_;
   std::vector<char> op_names_;
+  std::vector<uint32_t> op_node_ids_;
+  std::vector<uint32_t> xnn_node_to_serialized_node_;
   std::vector<uint64_t> op_timings_;
   uint64_t run_count_;
   et_timestamp_t start_time_;
@@ -66,6 +75,7 @@ class XNNProfiler {
 #endif
 
   executorch::runtime::Error get_runtime_operator_names();
+  executorch::runtime::Error get_runtime_operator_node_ids();
   executorch::runtime::Error get_runtime_num_operators();
   executorch::runtime::Error get_runtime_operator_timings();
 
