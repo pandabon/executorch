@@ -115,6 +115,15 @@ class XnnpackBackend final
       weights_cache->initialize_for_runtime(
           context.get_runtime_allocator(), named_data_map);
       workspace->set_uses_weight_cache();
+    } else if (xnnpack::XNNWeightsCacheManager::has_prepacked_weights()) {
+      // set_prepacked_weights() only feeds the weights cache. Say so once,
+      // because otherwise the blob is silently ignored and weights are packed.
+      static std::once_flag prepacked_ignored_logged;
+      std::call_once(prepacked_ignored_logged, [] {
+        ET_LOG(
+            Info,
+            "Prepacked weights were registered but the XNNPACK weights cache is off; ignoring them");
+      });
     }
 
     auto [workspace_lock, workspace_ptr] = workspace->acquire();

@@ -17,6 +17,9 @@
 #include <cerrno>
 #endif
 #include <xnnpack.h>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <new>
@@ -347,6 +350,10 @@ Result<std::vector<std::string>> XNNWeightsCache::finalize_for_runtime() {
   unpacked_data_.clear();
   unpacked_data_to_name_.clear();
 
+  if (verify_mode_) {
+    log_verify_summary();
+  }
+
   std::vector<std::string> packed_data_names;
   // update the reference count of all the packed data
   // used by this runtime
@@ -673,6 +680,9 @@ size_t XNNWeightsCache::look_up_or_insert(
         weight_bias_name.append(bias_entry->second);
       }
     }
+    if (context->verify_mode_) {
+      context->verify_against_blob(weight_bias_name, ptr, size, cache_key->seed);
+    }
     PackedDataMeta packed_data_metadata;
     packed_data_metadata.offset = next_offset;
     packed_data_metadata.data_size = size;
@@ -811,6 +821,247 @@ Error XNNWeightsCache::save_packed_index() {
   return Error::Ok;
 }
 
+bool XNNWeightsCache::parse_packed_trailer(
+    const uint8_t* base,
+    size_t size,
+    std::vector<TrailerEntry>& entries,
+    uint64_t* index_start_out) {
+  entries.clear();
+  if (size < 20) {
+    return false;
+  }
+  const uint8_t* footer = base + size - 20;
+  uint64_t index_start = read_le<uint64_t>(footer);
+  uint32_t entry_count = read_le<uint32_t>(footer + 8);
+  uint32_t magic = read_le<uint32_t>(footer + 12);
+  uint32_t version = read_le<uint32_t>(footer + 16);
+
+  if (magic != kCacheMagic || version != kCacheVersion ||
+      index_start >= size - 20) {
+    return false;
+  }
+  const size_t index_region_end = size - 20;
+  const uint8_t* cursor = base + index_start;
+  const uint8_t* end = base + index_region_end;
+
+  for (uint32_t i = 0; i < entry_count && cursor + 4 <= end; ++i) {
+    uint32_t name_len = read_le<uint32_t>(cursor);
+    cursor += 4;
+    // [file_offset:u64][data_size:u64][seed:u32] = 20 bytes
+    if (cursor + name_len + 20 > end) {
+      // Truncated entry header: trailer doesn't match the entry_count we
+      // read from the footer, so the image is corrupt. Reject it whole —
+      // otherwise the entries parsed so far would be silently accepted as a
+      // partial cache, and the next save_packed_index would rewrite a trailer
+      // covering only that subset (permanently dropping the rest).
+      ET_LOG(
+          Error,
+          "load_packed_cache: truncated entry header at index %u (entry_count=%u); aborting load",
+          i,
+          entry_count);
+      entries.clear();
+      return false;
+    }
+    TrailerEntry e;
+    e.name.assign(reinterpret_cast<const char*>(cursor), name_len);
+    cursor += name_len;
+    e.file_offset = read_le<uint64_t>(cursor);
+    cursor += 8;
+    e.data_size = read_le<uint64_t>(cursor);
+    cursor += 8;
+    e.seed = read_le<uint32_t>(cursor);
+    cursor += 4;
+
+    // Bounds check: the entry's bytes must lie entirely inside the
+    // packed-data region.
+    if (e.file_offset >= index_start ||
+        e.data_size > index_start - e.file_offset) {
+      ET_LOG(
+          Error,
+          "load_packed_cache: entry '%s' has invalid bounds (file_offset=%llu, data_size=%llu, index_start=%llu); aborting load",
+          e.name.c_str(),
+          static_cast<unsigned long long>(e.file_offset),
+          static_cast<unsigned long long>(e.data_size),
+          static_cast<unsigned long long>(index_start));
+      entries.clear();
+      return false;
+    }
+    entries.push_back(std::move(e));
+  }
+  if (index_start_out != nullptr) {
+    *index_start_out = index_start;
+  }
+  return true;
+}
+
+// Short, log-friendly form of a (possibly very long) weight+bias name:
+// first and last 16 characters, the total length and an FNV-1a hash.
+static std::string short_name(const std::string& name) {
+  uint32_t h = 2166136261u;
+  for (unsigned char c : name) {
+    h = (h ^ c) * 16777619u;
+  }
+  char buf[96];
+  if (name.size() <= 32) {
+    snprintf(buf, sizeof(buf), "%s#%08x", name.c_str(), h);
+  } else {
+    snprintf(
+        buf,
+        sizeof(buf),
+        "%.16s..%s(len=%zu)#%08x",
+        name.c_str(),
+        name.c_str() + name.size() - 16,
+        name.size(),
+        h);
+  }
+  return std::string(buf);
+}
+
+// The in-memory path reuses the XPWC v2 format of save_packed_index() and
+// load_packed_cache() in this file; only the source of the bytes differs (a
+// caller-owned blob instead of an mmap'd file). Penguin (RISC-V, Zephyr) has
+// no filesystem, so the blob is linked into the ELF as a data section.
+Error XNNWeightsCache::use_packed_memory(
+    const void* base,
+    size_t size,
+    bool verify) {
+  if (base == nullptr || size == 0) {
+    ET_LOG(Error, "use_packed_memory: empty blob");
+    return Error::InvalidArgument;
+  }
+  if (!packed_cache_path_.empty() || !name_to_packed_data_metadata_.empty() ||
+      !verify_blob_.empty()) {
+    ET_LOG(
+        Error,
+        "use_packed_memory: cache already has a path or entries; call it once, first");
+    return Error::InvalidState;
+  }
+  const uint8_t* bytes = static_cast<const uint8_t*>(base);
+  std::vector<TrailerEntry> entries;
+  if (!parse_packed_trailer(bytes, size, entries, nullptr)) {
+    ET_LOG(Error, "use_packed_memory: invalid XPWC v2 trailer");
+    return Error::InvalidProgram;
+  }
+  // XNNPACK's packed kernels expect kPackedAllocationAlignment-aligned
+  // weights. Unlike a file mmap (page-aligned), a blob can sit anywhere, so
+  // check each entry instead of assuming.
+  for (const TrailerEntry& e : entries) {
+    if ((reinterpret_cast<uintptr_t>(bytes + e.file_offset) %
+         kPackedAllocationAlignment) != 0) {
+      ET_LOG(
+          Error,
+          "use_packed_memory: entry %s at offset %llu is not %zu-byte aligned in memory",
+          short_name(e.name).c_str(),
+          static_cast<unsigned long long>(e.file_offset),
+          kPackedAllocationAlignment);
+      return Error::InvalidProgram;
+    }
+  }
+
+  if (verify) {
+    verify_mode_ = true;
+    for (const TrailerEntry& e : entries) {
+      verify_blob_[e.name] = {bytes + e.file_offset, e.data_size, e.seed, false};
+    }
+    ET_LOG(
+        Info,
+        "PREPACK VERIFY: comparing against %zu blob entries (%zu bytes)",
+        entries.size(),
+        size);
+    return Error::Ok;
+  }
+
+  size_t blob_bytes = 0;
+  for (const TrailerEntry& e : entries) {
+    // Same bookkeeping as a warm load_packed_cache. Not added to
+    // ptr_to_file_offset_ or mmap_regions_: those mean "we may write or
+    // unmap this", which must never be true for the blob (see
+    // save_packed_index, release_entry, full_unload). from_load keeps
+    // delete_packed_data from releasing the entries.
+    PackedDataMeta meta;
+    meta.offset = packed_data_ptrs_.size();
+    meta.data_size = e.data_size;
+    meta.from_load = true;
+    meta.seed = e.seed;
+    packed_data_ptrs_.push_back(
+        const_cast<uint8_t*>(bytes + e.file_offset)); // never written
+    blob_bytes += static_cast<size_t>(e.data_size);
+    name_to_packed_data_metadata_[e.name] = meta;
+  }
+  // Later misses (weights not in the blob) pack into heap.
+  loaded_from_disk_ = true;
+  record_mapped_alloc(blob_bytes);
+  // Not a fallback: the weights are served in place.
+  mark_cache_file_backed();
+  ET_LOG(
+      Info,
+      "Using prepacked weights in memory: %zu entries, %zu bytes",
+      entries.size(),
+      blob_bytes);
+  return Error::Ok;
+}
+
+void XNNWeightsCache::verify_against_blob(
+    const std::string& name,
+    const void* packed,
+    size_t size,
+    uint32_t seed) {
+  auto it = verify_blob_.find(name);
+  if (it == verify_blob_.end()) {
+    verify_missing_in_blob_++;
+    ET_LOG(
+        Info,
+        "PREPACK VERIFY entry %s: board_size=%zu board_seed=0x%08x not in blob",
+        short_name(name).c_str(),
+        size,
+        seed);
+    return;
+  }
+  VerifyBlobEntry& blob = it->second;
+  blob.used = true;
+  const size_t common = size < blob.data_size ? size : (size_t)blob.data_size;
+  long long first_diff = -1;
+  const uint8_t* a = static_cast<const uint8_t*>(packed);
+  for (size_t i = 0; i < common; ++i) {
+    if (a[i] != blob.data[i]) {
+      first_diff = static_cast<long long>(i);
+      break;
+    }
+  }
+  const bool ok = size == blob.data_size && seed == blob.seed && first_diff < 0;
+  if (ok) {
+    verify_matched_++;
+  } else {
+    verify_mismatched_++;
+  }
+  ET_LOG(
+      Info,
+      "PREPACK VERIFY entry %s: board_size=%zu blob_size=%llu board_seed=0x%08x blob_seed=0x%08x %s first_diff=%lld",
+      short_name(name).c_str(),
+      size,
+      static_cast<unsigned long long>(blob.data_size),
+      seed,
+      blob.seed,
+      ok ? "MATCH" : "MISMATCH",
+      first_diff);
+}
+
+void XNNWeightsCache::log_verify_summary() const {
+  size_t never_used = 0;
+  for (const auto& kv : verify_blob_) {
+    if (!kv.second.used) {
+      never_used++;
+    }
+  }
+  ET_LOG(
+      Info,
+      "PREPACK VERIFY matched=%zu mismatched=%zu missing_in_blob=%zu blob_entries_never_used=%zu",
+      verify_matched_,
+      verify_mismatched_,
+      verify_missing_in_blob_,
+      never_used);
+}
+
 bool XNNWeightsCache::load_packed_cache() {
 #if !defined(_WIN32) && !defined(__ZEPHYR__)
   int fd = open(packed_cache_path_.c_str(), O_RDONLY);
@@ -838,17 +1089,13 @@ bool XNNWeightsCache::load_packed_cache() {
     close(fd);
     return false;
   }
-  uint64_t index_start = read_le<uint64_t>(footer);
-  uint32_t entry_count = read_le<uint32_t>(footer + 8);
-  uint32_t magic = read_le<uint32_t>(footer + 12);
-  uint32_t version = read_le<uint32_t>(footer + 16);
-
-  if (magic != kCacheMagic || version != kCacheVersion ||
-      index_start >= file_size - 20) {
+  // Cheap pre-check so a file with a bad footer is not mmap'd at all. The
+  // full check (and the entry parsing) is parse_packed_trailer below.
+  if (read_le<uint32_t>(footer + 12) != kCacheMagic ||
+      read_le<uint32_t>(footer + 16) != kCacheVersion) {
     close(fd);
     return false;
   }
-  const size_t index_region_end = file_size - 20;
 
   void* map = mmap(nullptr, file_size, PROT_READ, MAP_SHARED, fd, 0);
   // The live MAP_SHARED mapping keeps this open file description — and with
@@ -862,80 +1109,35 @@ bool XNNWeightsCache::load_packed_cache() {
   if (map == MAP_FAILED) {
     return false;
   }
+
+  std::vector<TrailerEntry> entries;
+  if (!parse_packed_trailer(
+          static_cast<const uint8_t*>(map), file_size, entries, nullptr)) {
+    // Nothing was inserted yet, so unmapping is the whole rollback.
+    munmap(map, file_size);
+    return false;
+  }
   mmap_regions_.push_back({map, file_size});
 
   // Bytes actually referenced by the index. Less than file_size whenever an
   // earlier run re-packed a name and orphaned its old bytes.
   size_t loaded_bytes = 0;
-  const uint8_t* cursor = static_cast<const uint8_t*>(map) + index_start;
-  const uint8_t* end = static_cast<const uint8_t*>(map) + index_region_end;
-
-  for (uint32_t i = 0; i < entry_count && cursor + 4 <= end; ++i) {
-    uint32_t name_len = read_le<uint32_t>(cursor);
-    cursor += 4;
-    // [file_offset:u64][data_size:u64][seed:u32] = 20 bytes
-    if (cursor + name_len + 20 > end) {
-      // Truncated entry header: trailer doesn't match the entry_count we
-      // read from the footer, so the cache is corrupt. Apply the same
-      // full rollback as the invalid-bounds branch below — otherwise the
-      // entries inserted so far would be silently accepted as a partial
-      // cache, and the next save_packed_index would rewrite a trailer
-      // covering only that subset (permanently dropping the rest).
-      ET_LOG(
-          Error,
-          "load_packed_cache: truncated entry header at index %u (entry_count=%u); aborting load",
-          i,
-          entry_count);
-      munmap(map, file_size);
-      mmap_regions_.pop_back();
-      name_to_packed_data_metadata_.clear();
-      packed_data_ptrs_.clear();
-      ptr_to_file_offset_.clear();
-      return false;
-    }
-    std::string name(reinterpret_cast<const char*>(cursor), name_len);
-    cursor += name_len;
-    uint64_t file_offset = read_le<uint64_t>(cursor);
-    cursor += 8;
-    uint64_t data_size = read_le<uint64_t>(cursor);
-    cursor += 8;
-    uint32_t seed = read_le<uint32_t>(cursor);
-    cursor += 4;
-
-    // Bounds check: the entry's bytes must lie entirely inside the
-    // packed-data region.
-    if (file_offset >= index_start || data_size > index_start - file_offset) {
-      ET_LOG(
-          Error,
-          "load_packed_cache: entry '%s' has invalid bounds (file_offset=%llu, data_size=%llu, index_start=%llu); aborting load",
-          name.c_str(),
-          static_cast<unsigned long long>(file_offset),
-          static_cast<unsigned long long>(data_size),
-          static_cast<unsigned long long>(index_start));
-      // Roll back any partial state.
-      munmap(map, file_size);
-      mmap_regions_.pop_back();
-      name_to_packed_data_metadata_.clear();
-      packed_data_ptrs_.clear();
-      ptr_to_file_offset_.clear();
-      return false;
-    }
-
+  for (const TrailerEntry& e : entries) {
     size_t ptr_index = packed_data_ptrs_.size();
-    void* entry_ptr = static_cast<char*>(map) + file_offset;
+    void* entry_ptr = static_cast<char*>(map) + e.file_offset;
     packed_data_ptrs_.push_back(entry_ptr);
     // Tracked so a subsequent save_packed_index can rewrite the trailer
     // covering both loaded and newly-packed entries.
-    ptr_to_file_offset_[entry_ptr] = file_offset;
+    ptr_to_file_offset_[entry_ptr] = e.file_offset;
     PackedDataMeta meta;
     meta.offset = ptr_index;
-    meta.data_size = data_size;
+    meta.data_size = e.data_size;
     meta.ref_count = 0;
     meta.in_current_runtime = false;
     meta.from_load = true;
-    meta.seed = seed;
-    loaded_bytes += static_cast<size_t>(data_size);
-    name_to_packed_data_metadata_[name] = meta;
+    meta.seed = e.seed;
+    loaded_bytes += static_cast<size_t>(e.data_size);
+    name_to_packed_data_metadata_[e.name] = meta;
   }
 
   // Start writing new packs AFTER the existing trailer (not at the

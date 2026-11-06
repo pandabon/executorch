@@ -70,6 +70,9 @@ class XNNWeightsCacheManager {
    */
   xnnpack::PackedCacheReport report() const;
 
+  /** True if set_prepacked_weights() registered a blob. */
+  static bool has_prepacked_weights();
+
   /** Test-only: count of live (non-expired) entries. */
   size_t live_count() const;
 

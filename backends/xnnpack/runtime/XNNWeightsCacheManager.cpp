@@ -19,6 +19,37 @@ namespace executorch::backends::xnnpack {
 using executorch::runtime::Error;
 using executorch::runtime::Result;
 
+namespace {
+// Process-wide in-memory packed-weights blob (set_prepacked_weights). Applied
+// to the empty-path cache every time it is (re)created, because that cache
+// dies when its last executor does.
+struct PrepackedBlob {
+  std::mutex mutex;
+  const void* base{nullptr};
+  size_t size{0};
+  bool verify{false};
+};
+
+PrepackedBlob& prepacked_blob() {
+  static PrepackedBlob blob;
+  return blob;
+}
+} // namespace
+
+void set_prepacked_weights(const void* base, size_t size, bool verify) {
+  PrepackedBlob& blob = prepacked_blob();
+  std::scoped_lock<std::mutex> lock(blob.mutex);
+  blob.base = base;
+  blob.size = size;
+  blob.verify = verify;
+}
+
+bool XNNWeightsCacheManager::has_prepacked_weights() {
+  PrepackedBlob& blob = prepacked_blob();
+  std::scoped_lock<std::mutex> lock(blob.mutex);
+  return blob.base != nullptr;
+}
+
 Result<std::shared_ptr<delegate::XNNWeightsCache>>
 XNNWeightsCacheManager::get_or_create(const std::string& cache_file_path) {
   // Empty path → one shared heap-only instance. See header for why.
@@ -28,6 +59,16 @@ XNNWeightsCacheManager::get_or_create(const std::string& cache_file_path) {
       return live;
     }
     auto cache = std::make_shared<delegate::XNNWeightsCache>();
+    {
+      PrepackedBlob& blob = prepacked_blob();
+      std::scoped_lock<std::mutex> blob_lock(blob.mutex);
+      if (blob.base != nullptr) {
+        // Before publishing, so nobody sees the cache without its blob. A bad
+        // blob is logged and the cache still works, packing into heap.
+        std::lock_guard<std::mutex> cache_lock(cache->mutex());
+        (void)cache->use_packed_memory(blob.base, blob.size, blob.verify);
+      }
+    }
     empty_path_cache_ = cache;
     return cache;
   }

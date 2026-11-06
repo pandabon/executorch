@@ -174,4 +174,25 @@ struct PackedCacheReport {
 
 PackedCacheReport get_packed_cache_report();
 
+/**
+ * Registers a packed-weights blob that is already in memory (for example a
+ * data section linked into the firmware, on targets with no filesystem such as
+ * Zephyr) for the shared weights cache. The blob uses the "XPWC" v2 layout of
+ * the packed weight cache file; see XNNWeightsCache::use_packed_memory().
+ *
+ * Process-wide. Call it before the first method is loaded; the blob is applied
+ * to the shared (empty-path) weights cache each time that cache is created.
+ * `base` must stay valid and unmodified for the life of the process, and
+ * `base + file_offset` of every entry must be 64-byte aligned.
+ *
+ * verify == false: weights found in the blob are used in place and not packed.
+ * verify == true: the board packs everything as usual and compares each packed
+ * weight with the blob, logging "PREPACK VERIFY" lines.
+ *
+ * Safe to call whether or not the weights cache is compiled in
+ * (ENABLE_XNNPACK_WEIGHTS_CACHE) or enabled at runtime; if it is not, the blob
+ * has no effect and that is logged once.
+ */
+void set_prepacked_weights(const void* base, size_t size, bool verify);
+
 } // namespace executorch::backends::xnnpack

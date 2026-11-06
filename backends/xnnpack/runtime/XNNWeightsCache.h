@@ -185,6 +185,32 @@ class XNNWeightsCache {
   Error save_packed_index();
 
   /**
+   * Serve packed weights from a blob that is already in memory (for example
+   * a data section linked into the firmware image), for targets with no
+   * filesystem or mmap such as Zephyr. The blob uses the same "XPWC" v2
+   * layout that save_packed_index() writes and load_packed_cache() reads
+   * (packed data, then an index, then a 20-byte footer), so a host-side tool
+   * can produce it with the same format.
+   *
+   * Call once, before the first initialize_for_runtime, on a cache with no
+   * packed_cache_path. `base` must stay valid and unmodified for the life of
+   * the cache; the cache never writes to, frees or unmaps it. Every entry's
+   * `base + file_offset` must be kPackedAllocationAlignment-aligned, which
+   * XNNPACK's packed kernels expect (page alignment is not required).
+   *
+   * verify == false: entries become cache hits, so XNNPACK reads the packed
+   * weights in place and never packs them. Weights that are not in the blob
+   * are still packed into heap.
+   *
+   * verify == true: the blob is not used for lookups. The board packs every
+   * weight as usual and each freshly packed entry whose name is in the blob
+   * is compared with the blob entry (size, seed, bytes). One line per entry
+   * and a cumulative "PREPACK VERIFY" summary at each finalize_for_runtime
+   * are logged. This proves a host-side packer is byte-exact.
+   */
+  Error use_packed_memory(const void* base, size_t size, bool verify);
+
+  /**
    * Per-instance mutex. The cache has no internal synchronization;
    * callers must hold this around every method call and every
    * XNNPACK callback that touches the cache during xnn_create_runtime.
@@ -244,6 +270,23 @@ class XNNWeightsCache {
   // seed, causing a stampede of re-packs. Reject v1 outright.
   static constexpr uint32_t kCacheVersion = 2;
   bool load_packed_cache();
+
+  // One index record of an XPWC v2 trailer.
+  struct TrailerEntry {
+    std::string name;
+    uint64_t file_offset;
+    uint64_t data_size;
+    uint32_t seed;
+  };
+  // Parses and bounds-checks the trailer of an XPWC v2 image at [base,
+  // base+size). Shared by load_packed_cache (mmap'd file) and
+  // use_packed_memory (blob in memory). Returns false, with `entries` left
+  // empty, if the image is malformed.
+  static bool parse_packed_trailer(
+      const uint8_t* base,
+      size_t size,
+      std::vector<TrailerEntry>& entries,
+      uint64_t* index_start_out);
   void reset_for_fresh_write();
   void release_entry(void* packed_data_ptr);
   void full_unload();
@@ -322,6 +365,27 @@ class XNNWeightsCache {
   // Consumed (and cleared) by reserve_space so the file-backed path is taken
   // only by the re-pack that directly follows the seed-mismatch look_up.
   bool last_lookup_seed_mismatch_{false};
+
+  // Verify mode of use_packed_memory: the blob's entries by name. These are
+  // never handed to XNNPACK; look_up_or_insert compares fresh packs with them.
+  struct VerifyBlobEntry {
+    const uint8_t* data;
+    uint64_t data_size;
+    uint32_t seed;
+    bool used;
+  };
+  bool verify_mode_{false};
+  std::unordered_map<std::string, VerifyBlobEntry> verify_blob_;
+  // Cumulative over the life of the instance.
+  size_t verify_matched_{0};
+  size_t verify_mismatched_{0};
+  size_t verify_missing_in_blob_{0};
+  void verify_against_blob(
+      const std::string& name,
+      const void* packed,
+      size_t size,
+      uint32_t seed);
+  void log_verify_summary() const;
 
   // See mutex() for the locking contract — caller-owned, no internal
   // use within this class.
