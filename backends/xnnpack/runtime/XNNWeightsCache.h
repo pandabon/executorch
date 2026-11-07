@@ -20,7 +20,9 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <deque>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace executorch {
@@ -307,6 +309,16 @@ class XNNWeightsCache {
   // initialization.
   std::unordered_map<void*, std::unique_ptr<char[]>>
       packed_pointer_to_container_;
+  // Placeholder addresses for constants whose raw bytes were stripped from the
+  // data map because the prepacked blob (use_packed_memory) holds their packed
+  // form. See load_unpacked_data. One byte each; a deque never moves them.
+  std::deque<uint8_t> placeholder_bytes_;
+  std::unordered_set<const void*> placeholder_ptrs_;
+  bool packed_memory_set_{false};
+  // Fails loudly when a lookup missed but XNNPACK would pack from a placeholder.
+  void check_not_placeholder(
+      const xnn_weights_cache_look_up_key* key,
+      const std::string& name) const;
   // Vector hodling list of unpacked freeable buffers
   std::vector<FreeableBuffer> unpacked_data_;
   // xnnpack's weight cache provider

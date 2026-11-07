@@ -233,6 +233,8 @@ Error XNNWeightsCache::initialize_for_runtime(
   }
   unpacked_data_.clear();
   unpacked_data_to_name_.clear();
+  placeholder_bytes_.clear();
+  placeholder_ptrs_.clear();
 
 #if !defined(_WIN32) && !defined(__ZEPHYR__)
   if (packed_cache_path_.empty() || packed_file_fd_ >= 0) {
@@ -344,11 +346,19 @@ Result<std::vector<std::string>> XNNWeightsCache::finalize_for_runtime() {
   // the executor by take_unpacked_data_from while the graph was being built;
   // the subgraph keeps pointers into those, so freeing them here would leave
   // the runtime reading freed memory.
+  if (!placeholder_ptrs_.empty()) {
+    ET_LOG(
+        Info,
+        "Stripped weights: %zu placeholders",
+        placeholder_ptrs_.size());
+  }
   for (FreeableBuffer& buffer : unpacked_data_) {
     buffer.Free();
   }
   unpacked_data_.clear();
   unpacked_data_to_name_.clear();
+  placeholder_bytes_.clear();
+  placeholder_ptrs_.clear();
 
   if (verify_mode_) {
     log_verify_summary();
@@ -399,6 +409,21 @@ Result<const uint8_t*> XNNWeightsCache::load_unpacked_data(
     const std::string& name) {
   Result<FreeableBuffer> named_data = named_data_map_->get_data(name.c_str());
   if (!named_data.ok()) {
+    if (packed_memory_set_) {
+      // The raw weights of this constant were stripped from the data map: the
+      // prepacked blob replaces them (use_packed_memory). XNNPACK reads the
+      // kernel and bias pointers only as cache keys when the lookup hits, so
+      // hand out a unique, valid address that is never dereferenced.
+      // look_up checks that no placeholder is ever packed from.
+      placeholder_bytes_.push_back(0);
+      const uint8_t* placeholder = &placeholder_bytes_.back();
+      placeholder_ptrs_.insert(placeholder);
+      // Keep get_num_unpacked_data() counting it: XNNCompiler only attaches
+      // the weights cache to the runtime when that count is above zero.
+      unpacked_data_.emplace_back(placeholder, 1, nullptr);
+      unpacked_data_to_name_[placeholder] = name;
+      return placeholder;
+    }
     ET_LOG(Error, "Failed to load constant data for key %s", name.c_str());
     return Error::InvalidExternalData;
   }
@@ -486,6 +511,16 @@ Error XNNWeightsCache::delete_packed_data(
   return Error::Ok;
 }
 
+void XNNWeightsCache::check_not_placeholder(
+    const xnn_weights_cache_look_up_key* key,
+    const std::string& name) const {
+  ET_CHECK_MSG(
+      placeholder_ptrs_.count(key->kernel) == 0 &&
+          (key->bias == nullptr || placeholder_ptrs_.count(key->bias) == 0),
+      "raw weights stripped but blob does not cover %s; rebuild the blob",
+      name.c_str());
+}
+
 size_t XNNWeightsCache::look_up(
     XNNWeightsCache* context,
     const xnn_weights_cache_look_up_key* cache_key) {
@@ -510,6 +545,7 @@ size_t XNNWeightsCache::look_up(
   auto packed_weight_entry =
       context->name_to_packed_data_metadata_.find(weight_bias_name);
   if (packed_weight_entry == context->name_to_packed_data_metadata_.end()) {
+    context->check_not_placeholder(cache_key, weight_bias_name);
     return SIZE_MAX;
   }
   // XNNPACK upgrade detection: a ukernel whose implementation changed
@@ -524,6 +560,7 @@ size_t XNNWeightsCache::look_up(
         packed_weight_entry->second.seed,
         cache_key->seed);
     context->last_lookup_seed_mismatch_ = true;
+    context->check_not_placeholder(cache_key, weight_bias_name);
     return SIZE_MAX;
   }
   packed_weight_entry->second.in_current_runtime = true;
@@ -990,6 +1027,8 @@ Error XNNWeightsCache::use_packed_memory(
   }
   // Later misses (weights not in the blob) pack into heap.
   loaded_from_disk_ = true;
+  // From now on a constant missing from the data map is a stripped weight.
+  packed_memory_set_ = true;
   record_mapped_alloc(blob_bytes);
   // Not a fallback: the weights are served in place.
   mark_cache_file_backed();
